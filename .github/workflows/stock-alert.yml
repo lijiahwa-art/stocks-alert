@@ -36,7 +36,7 @@ jobs:
           WINDOW_DAYS      = 60                  # 近 3 個月 ≈ 60 交易日
           INTRADAY_INTERVAL= "5m"                # 盤中 5 分鐘 K
           INTRADAY_PERIOD  = "7d"                # 抓 7 天即可
-          LOOKBACK_BARS    = 72                   # 回看最近 5 根（約 25 分避免漏報）
+          LOOKBACK_BARS    = 500                   # 回看最近 5 根（約 25 分避免漏報）
           # =================================
 
           NY  = ZoneInfo("America/New_York")
