@@ -31,14 +31,14 @@ jobs:
             # 美股
             "QQQ","VOO","NVDA","AAPL","TSLA","GOOGL","OKLO","LEU","AMD","TSM",
             # 台股（.TW / .TWO）
-            "2330.TW","0050.TW","1504.TW","3231.TW","3189.TW","2317.TW"
+            "2330.TW","0050.TW","1504.TW","3231.TW","3189.TW","2317.TW","2449.TW",
           ]
-          THRESHOLDS            = [0.07, 0.12, 0.18]   # 7%、12%、18%
+          THRESHOLDS            = [0.07, 0.12, 0.18,0.25]   # 7%、12%、18%、25%
           WINDOW_DAYS           = 60                   # 近 60 日高
           INTRA_INTERVAL        = "5m"
           INTRA_PERIOD          = "7d"
           INTRA_BACKBARS        = 100                  # 用最後兩根判斷
-          DEMO_IGNORE_SESSIONS  = True                 # 測試時先 True，常駐改 False
+          DEMO_IGNORE_SESSIONS  = False                # 測試時先 True，常駐改 False
 
           NY  = ZoneInfo("America/New_York")
           TPE = ZoneInfo("Asia/Taipei")
