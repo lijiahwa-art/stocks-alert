@@ -42,7 +42,7 @@ jobs:
           INTRA_INTERVAL        = "5m"                 # 5 分鐘 K
           INTRA_PERIOD          = "7d"                 # 拉 7 天拿到最新價
           INTRA_BACKBARS        = 100                  # ✅ 回測最近 100 根 5m（用最後兩根判斷）
-          DEMO_IGNORE_SESSIONS  = False                # ✅ 測試時改 True：忽略盤中時間限制
+          DEMO_IGNORE_SESSIONS  = True                # ✅ 測試時改 True False：忽略盤中時間限制
 
           UTC = ZoneInfo("UTC"); NY = ZoneInfo("America/New_York"); TPE = ZoneInfo("Asia/Taipei")
 
