@@ -14,7 +14,7 @@ jobs:
           python3 -m pip install --upgrade pip
           pip3 install yfinance pandas numpy requests
 
-      - name: Check and alert (US+TW intraday, 60-day high, 7/12/18%, lookback)
+      - name: Check and alert (US+TW intraday, 60-day high, 9/12/18%, lookback)
         env:
           LINE_TOKEN: ${{ secrets.LINE_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
@@ -32,11 +32,11 @@ jobs:
             "QQQ","VOO","NVDA","AAPL","LEU","ONDS","OKLO","GOOGL","AMD","TSM","TSLA",
             "2330.TW","3231.TW","1504.TW","2317.TW","3189.TW"
           ]
-          THRESHOLDS       = [0.09, 0.12, 0.18]  # 回落 9%、12%、18%
-          WINDOW_DAYS      = 60                  # 近 3 個月 ≈ 60 交易日
-          INTRADAY_INTERVAL= "5m"                # 盤中 5 分鐘 K
-          INTRADAY_PERIOD  = "7d"                # 抓 7 天即可
-          LOOKBACK_BARS    = 500                 # 回看最近 500 根（避免漏報）
+          THRESHOLDS        = [0.09, 0.12, 0.18]  # 回落 9%、12%、18%
+          WINDOW_DAYS       = 60                  # 近 3 個月 ≈ 60 交易日
+          INTRADAY_INTERVAL = "5m"                # 盤中 5 分鐘 K
+          INTRADAY_PERIOD   = "7d"                # 抓 7 天即可
+          LOOKBACK_BARS     = 500                 # 回看最近 500 根（避免漏報）
           # =================================
 
           NY  = ZoneInfo("America/New_York")
@@ -97,7 +97,8 @@ jobs:
               c = df["Close"].dropna()
               if len(c) < max(WINDOW_DAYS, 5):
                   return s, None
-              roll_high = c.rolling(WINDOW_DAYS).max().dropna().iloc[-1].to_numpy().item()
+              # 取標量 float
+              roll_high = float(c.rolling(WINDOW_DAYS).max().dropna().iloc[-1])
               return s, roll_high
 
           def alert_text(s, last, roll_high, dd_last, levels, basis_txt):
@@ -109,13 +110,14 @@ jobs:
 
           def check_one(sym):
               s_norm = normalize(sym)
-              # 盤中時段判斷
-              #if is_tw_symbol(s_norm):
-              #   if not is_tw_session_now():
-              #       return f"SKIP {s_norm} (台股非盤中)"
+
+              # 盤中時段判斷（目前關閉方便測試）
+              # if is_tw_symbol(s_norm):
+              #     if not is_tw_session_now():
+              #         return f"SKIP {s_norm} (台股非盤中)"
               # else:
-              #   if not is_us_session_now():
-              #       return f"SKIP {s_norm} (美股非盤中)"
+              #     if not is_us_session_now():
+              #         return f"SKIP {s_norm} (美股非盤中)"
 
               # 近60日高（用日線）
               s, roll_high = calc_rolling_high_close(s_norm)
@@ -130,30 +132,33 @@ jobs:
               if len(close) < 3:
                   return f"[WARN] 盤中價不足 {s}"
 
-              # 近 LOOKBACK_BARS 根（含當根）
+              # 近 LOOKBACK_BARS 根（含當根）— 全轉 float
               tail = close.iloc[-(LOOKBACK_BARS+1):] if len(close) >= (LOOKBACK_BARS+1) else close
+              tail = tail.astype(float)
               dd = (roll_high - tail) / roll_high
 
-              # ===== 固定輸出 DEBUG（你要看的）=====
+              # ===== 固定輸出 DEBUG =====
               try:
-                  prev = tail.iloc[-2].to_numpy().item()
+                  prev = float(tail.iloc[-2])
               except Exception:
                   prev = None
-              last = tail.iloc[-1].to_numpy().item()
-              dd_last = (roll_high - last) / roll_high
+              last = float(tail.iloc[-1])
+              dd_last = float((roll_high - last) / roll_high)
               dd_min = float(dd.min()) * 100.0
               dd_max = float(dd.max()) * 100.0
               print(f"[DEBUG] {s} roll_high={roll_high:.2f} "
                     f"prev={prev if prev is not None else 'n/a'} last={last:.2f} "
                     f"dd_last={dd_last*100:.2f}% dd_min={dd_min:.2f}% dd_max={dd_max:.2f}%")
-              # =====================================
+              # =========================
 
-              # 尋找「近 LOOKBACK_BARS 內首次跨越」的級別
+              # 尋找「近 LOOKBACK_BARS 內首次跨越」的級別（逐點轉 float 再比）
               alert_levels = []
               for th in THRESHOLDS:
                   crossed = False
                   for i in range(1, len(dd)):
-                      if dd.iloc[i-1] < th <= dd.iloc[i]:
+                      prev_dd = float(dd.iloc[i-1])
+                      curr_dd = float(dd.iloc[i])
+                      if prev_dd < th <= curr_dd:
                           crossed = True
                           break
                   if crossed:
@@ -162,17 +167,19 @@ jobs:
               # 隔夜補償：若昨日收盤在門檻上、現價在門檻下，第一次執行也推一次
               _, daily = daily_series(s_norm)
               if daily is not None and "Close" in daily.columns and len(daily["Close"].dropna()) >= 2:
-                  prev_day_close = daily["Close"].dropna().iloc[-2].to_numpy().item()
-                  dd_prev_day = (roll_high - prev_day_close) / roll_high
-                  curr = close.iloc[-1].to_numpy().item()
-                  dd_curr = (roll_high - curr) / roll_high
+                  prev_day_close = float(daily["Close"].dropna().iloc[-2])
+                  dd_prev_day = float((roll_high - prev_day_close) / roll_high)
+
+                  curr = float(close.iloc[-1])
+                  dd_curr = float((roll_high - curr) / roll_high)
+
                   for th in THRESHOLDS:
                       if dd_prev_day < th <= dd_curr and th not in alert_levels:
                           alert_levels.append(th)
 
               # 以最新價決策輸出
-              last = close.iloc[-1].to_numpy().item()
-              dd_last = (roll_high - last) / roll_high
+              last = float(close.iloc[-1])
+              dd_last = float((roll_high - last) / roll_high)
 
               if alert_levels:
                   msg = alert_text(s, last, roll_high, dd_last, alert_levels, basis_txt="60日高 vs 5m 價")
