@@ -101,12 +101,14 @@ jobs:
                       f"基準：{basis_txt}\nUTC：{now_utc}")
 
           def check_intraday(sym):
-              if is_tw_symbol(sym):
-                  if not is_tw_session_now():
-                      return f"SKIP {sym} (台股非盤中)"
-              else:
-                  if not is_us_session_now():
-                      return f"SKIP {sym} (美股非盤中)"
+          # ==== TEMP 測試：忽略盤中限制 ====
+          #    if is_tw_symbol(sym):
+          #       if not is_tw_session_now():
+          #           return f"SKIP {sym} (台股非盤中)"
+          #    else:
+          #       if not is_us_session_now():
+          #          return f"SKIP {sym} (美股非盤中)"
+          # ==== TEMP END ====
 
               s, roll_high = calc_rolling_high_close(sym)
               if roll_high is None:
