@@ -17,7 +17,7 @@ jobs:
           python3 -m pip install --upgrade pip
           pip3 install yfinance pandas requests pytz
 
-      - name: Check and alert (with logs; crossing OR first-enter; 5m back=100)
+      - name: Check and alert (scalars; no FutureWarning/Series ambiguity)
         env:
           LINE_TOKEN: ${{ secrets.LINE_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
@@ -41,8 +41,8 @@ jobs:
           WINDOW_DAYS           = 60                   # 近 60 交易日（日K）
           INTRA_INTERVAL        = "5m"                 # 5 分鐘 K
           INTRA_PERIOD          = "7d"                 # 拉 7 天拿到最新價
-          INTRA_BACKBARS        = 100                  # ✅ 回測最近 100 根 5m（用最後兩根判斷）
-          DEMO_IGNORE_SESSIONS  = True                # ✅ 測試時改 True False：忽略盤中時間限制
+          INTRA_BACKBARS        = 100                  # 回測最近 100 根（用最後兩根判斷）
+          DEMO_IGNORE_SESSIONS  = True                # 測試改 True：False忽略盤中時間限制
 
           UTC = ZoneInfo("UTC"); NY = ZoneInfo("America/New_York"); TPE = ZoneInfo("Asia/Taipei")
 
@@ -81,24 +81,29 @@ jobs:
               dfd = yf.download(sym, period=f"{N+40}d", interval="1d",
                                 auto_adjust=False, progress=False).dropna()
               if dfd.empty or "High" not in dfd: raise RuntimeError("no daily High")
-              highs = dfd["High"].astype(float)
-              return float(highs.rolling(N).max().iloc[-1] if len(highs)>=N else highs.tail(N).max())
+              highs = pd.to_numeric(dfd["High"], errors="coerce").dropna()
+              if highs.empty: raise RuntimeError("empty highs")
+              if len(highs) >= N:
+                  return float(highs.rolling(N).max().iloc[-1])
+              return float(highs.tail(N).max())
 
           def get_5m_close_series(sym: str) -> pd.Series:
               """回傳 5m Close 序列；不足時退回日線 Close 序列。"""
               try:
                   df5 = yf.download(sym, period=INTRA_PERIOD, interval=INTRA_INTERVAL,
                                     auto_adjust=False, progress=False).dropna()
-                  s = df5["Close"]
-                  if len(s) >= max(INTRA_BACKBARS + 1, 2):
-                      return s
+                  if "Close" in df5:
+                      s = pd.to_numeric(df5["Close"], errors="coerce").dropna()
+                      if len(s) >= max(INTRA_BACKBARS + 1, 2):
+                          return s
               except Exception as e:
                   print(f"[INFO] 5m fetch fail {sym}: {e.__class__.__name__}")
               dfd = yf.download(sym, period="30d", interval="1d",
                                 auto_adjust=False, progress=False).dropna()
-              if "Close" not in dfd or len(dfd["Close"]) < max(INTRA_BACKBARS + 1, 2):
-                  raise RuntimeError("no enough price bars")
-              return dfd["Close"]
+              if "Close" not in dfd: raise RuntimeError("no daily Close")
+              s = pd.to_numeric(dfd["Close"], errors="coerce").dropna()
+              if len(s) < max(INTRA_BACKBARS + 1, 2): raise RuntimeError("no enough price bars")
+              return s
 
           # ========= 工具 =========
           def level_index(val: float, levels:list[float])->int:
@@ -108,42 +113,44 @@ jobs:
                   if val >= th: idx = i
               return idx
 
-          # ========= 主邏輯 =========
+          # ========= 主邏輯（全部用『純量』避免 Series 比較）=========
           def check_one(sym:str)->str:
               # 盤中限制（除非 DEMO_IGNORE_SESSIONS=True）
               if not DEMO_IGNORE_SESSIONS:
                   if is_tw(sym) and not tw_session_now():   return f"SKIP {sym} (台股非盤中)"
                   if not is_tw(sym) and not us_session_now(): return f"SKIP {sym} (美股非盤中)"
 
-              base = recent_N_high(sym, WINDOW_DAYS)            # 60 日高（基準）
-              s    = get_5m_close_series(sym).astype(float)     # 5m close 序列
-              closes = s.tail(INTRA_BACKBARS + 1)               # 需要 N+1 根
+              base = float(recent_N_high(sym, WINDOW_DAYS))        # 60 日高（純量）
+              s    = get_5m_close_series(sym)                      # 5m close 序列
+              closes = s.tail(INTRA_BACKBARS + 1)
               if len(closes) < INTRA_BACKBARS + 1:
                   return f"[SKIP] {sym} not enough 5m bars"
 
-              dd = (base - closes) / base                       # 回落比例序列
-              dd_prev, dd_last = float(dd.iloc[-2]), float(dd.iloc[-1])
+              prevC = float(closes.iloc[-2])
+              lastC = float(closes.iloc[-1])
+              dd_prev = (base - prevC) / base                      # 純量
+              dd_last = (base - lastC) / base                      # 純量
 
               # (A) 跨門檻（上一根 < th ≤ 最新一根）
-              crossed = [th for th in THRESHOLDS if dd.iloc[-2] < th <= dd.iloc[-1]]
+              crossed = [th for th in THRESHOLDS if dd_prev < th <= dd_last]
 
               # (B) 在/低於門檻（首次落入某層級，不重複）
               now_level  = level_index(dd_last, THRESHOLDS)
               last_level = int(STATE.get(sym, 0))
               at_or_below_trigger = (now_level > last_level) and (now_level > 0)
 
-              # ====== 你要看的詳細 log ======
+              # ====== 詳細 log ======
               print(
-                f"[LOG] {sym} | base={base:.4f} | prevC={float(closes.iloc[-2]):.4f} | "
-                f"lastC={float(closes.iloc[-1]):.4f} | dd_prev={dd_prev*100:.2f}% | "
-                f"dd_last={dd_last*100:.2f}% | crossed={[int(x*100) for x in crossed]} | "
-                f"level_prev={last_level} -> level_now={now_level} | lookback={INTRA_BACKBARS}"
+                f"[LOG] {sym} | base={base:.4f} | prevC={prevC:.4f} | lastC={lastC:.4f} | "
+                f"dd_prev={dd_prev*100:.2f}% | dd_last={dd_last*100:.2f}% | "
+                f"crossed={[int(x*100) for x in crossed]} | level_prev={last_level} -> level_now={now_level} | "
+                f"lookback={INTRA_BACKBARS}"
               )
 
               if not crossed and not at_or_below_trigger:
                   return f"OK {sym} {dd_last*100:.2f}%"
 
-              # 更新層級以避免同層重複（短期）
+              # 更新層級（避免同層重複）
               if at_or_below_trigger and now_level > 0:
                   STATE[sym] = now_level
                   save_state()
