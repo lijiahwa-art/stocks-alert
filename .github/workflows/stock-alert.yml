@@ -9,15 +9,15 @@ jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-      - name: Show Python
+      - name: Python version
         run: python3 --version
 
-      - name: Install deps (no external actions)
+      - name: Install deps
         run: |
           python3 -m pip install --upgrade pip
           pip3 install yfinance pandas requests pytz
 
-      - name: Check and alert (sessions; crossing OR at/below; de-dup; 5m lookback=100)
+      - name: Check and alert (with logs; crossing OR first-enter; 5m back=100)
         env:
           LINE_TOKEN: ${{ secrets.LINE_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
@@ -33,16 +33,17 @@ jobs:
           # ========= 你可調的參數 =========
           SYMBOLS = [
             # 美股
-            "QQQ","VOO","NVDA","AAPL","TSLA","GOOGL","OKLO","LEU","AMD","TSM"
-            # 台股（記得加 .TW / .TWO）
-            "2330.TW","0050.TW","1504.TW","3231,TW","3189.TW","2317.TW"
+            "QQQ","VOO","NVDA","AAPL","TSLA","GOOGL","OKLO","LEU","AMD","TSM",
+            # 台股（記得 .TW / .TWO）
+            "2330.TW","0050.TW","1504.TW","3231.TW","3189.TW","2317.TW"
           ]
           THRESHOLDS            = [0.07, 0.12, 0.18]   # 回落 7%、12%、18%
           WINDOW_DAYS           = 60                   # 近 60 交易日（日K）
           INTRA_INTERVAL        = "5m"                 # 5 分鐘 K
           INTRA_PERIOD          = "7d"                 # 拉 7 天拿到最新價
           INTRA_BACKBARS        = 100                  # ✅ 回測最近 100 根 5m（用最後兩根判斷）
-          DEMO_IGNORE_SESSIONS  = True                # ✅ 測試時改 True：False忽略盤中時間限制
+          DEMO_IGNORE_SESSIONS  = False                # ✅ 測試時改 True：忽略盤中時間限制
+
           UTC = ZoneInfo("UTC"); NY = ZoneInfo("America/New_York"); TPE = ZoneInfo("Asia/Taipei")
 
           # ========= LINE =========
@@ -131,10 +132,13 @@ jobs:
               last_level = int(STATE.get(sym, 0))
               at_or_below_trigger = (now_level > last_level) and (now_level > 0)
 
-              print(f"{sym}: base={base:.4f} lastC={float(closes.iloc[-1]):.4f} "
-                    f"dd_prev={dd_prev:.4%} dd_last={dd_last:.4%} "
-                    f"crossed={crossed} level_prev={last_level} level_now={now_level} "
-                    f"lookback={INTRA_BACKBARS}")
+              # ====== 你要看的詳細 log ======
+              print(
+                f"[LOG] {sym} | base={base:.4f} | prevC={float(closes.iloc[-2]):.4f} | "
+                f"lastC={float(closes.iloc[-1]):.4f} | dd_prev={dd_prev*100:.2f}% | "
+                f"dd_last={dd_last*100:.2f}% | crossed={[int(x*100) for x in crossed]} | "
+                f"level_prev={last_level} -> level_now={now_level} | lookback={INTRA_BACKBARS}"
+              )
 
               if not crossed and not at_or_below_trigger:
                   return f"OK {sym} {dd_last*100:.2f}%"
@@ -154,12 +158,11 @@ jobs:
                   f"📉 {sym} 近{WINDOW_DAYS}日高回落觸發：{levels_txt}\n"
                   f"回落 {dd_last*100:.2f}%｜基準高 {base:.2f}\n"
                   f"（5m 回測 {INTRA_BACKBARS} 根；以最新兩根判斷）\n"
-                  f"UTC：{dt.datetime.now(UTC):%Y-%m-%d %H:%M}"
+                  f"UTC：{dt.datetime.now(ZoneInfo('UTC')):%Y-%m-%d %H:%M}"
               )
               send_line(msg)
               return f"ALERT {sym} {levels_txt}"
 
-          # 跑清單
           results=[]
           for s in SYMBOLS:
               try:
