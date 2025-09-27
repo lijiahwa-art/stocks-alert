@@ -2,5 +2,3 @@ yfinance==0.2.40
 pandas==2.2.2
 numpy==1.26.4
 requests==2.32.3
-schedule==1.2.1
-psycopg2-binary==2.9.9
