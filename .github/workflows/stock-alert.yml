@@ -32,11 +32,11 @@ jobs:
             "QQQ","VOO","NVDA","AAPL","LEU","ONDS","OKLO","GOOGL","AMD","TSM","TSLA",
             "2330.TW","3231.TW","1504.TW","2317.TW","3189.TW"
           ]
-          THRESHOLDS       = [0.09, 0.12, 0.18]  # 回落 3%、12%、18%
+          THRESHOLDS       = [0.09, 0.12, 0.18]  # 回落 9%、12%、18%
           WINDOW_DAYS      = 60                  # 近 3 個月 ≈ 60 交易日
           INTRADAY_INTERVAL= "5m"                # 盤中 5 分鐘 K
           INTRADAY_PERIOD  = "7d"                # 抓 7 天即可
-          LOOKBACK_BARS    = 500                   # 回看最近 5 根（約 25 分避免漏報）
+          LOOKBACK_BARS    = 500                 # 回看最近 500 根（避免漏報）
           # =================================
 
           NY  = ZoneInfo("America/New_York")
@@ -97,7 +97,7 @@ jobs:
               c = df["Close"].dropna()
               if len(c) < max(WINDOW_DAYS, 5):
                   return s, None
-              roll_high = float(c.rolling(WINDOW_DAYS).max().dropna().iloc[-1])
+              roll_high = c.rolling(WINDOW_DAYS).max().dropna().iloc[-1].to_numpy().item()
               return s, roll_high
 
           def alert_text(s, last, roll_high, dd_last, levels, basis_txt):
@@ -134,6 +134,20 @@ jobs:
               tail = close.iloc[-(LOOKBACK_BARS+1):] if len(close) >= (LOOKBACK_BARS+1) else close
               dd = (roll_high - tail) / roll_high
 
+              # ===== 固定輸出 DEBUG（你要看的）=====
+              try:
+                  prev = tail.iloc[-2].to_numpy().item()
+              except Exception:
+                  prev = None
+              last = tail.iloc[-1].to_numpy().item()
+              dd_last = (roll_high - last) / roll_high
+              dd_min = float(dd.min()) * 100.0
+              dd_max = float(dd.max()) * 100.0
+              print(f"[DEBUG] {s} roll_high={roll_high:.2f} "
+                    f"prev={prev if prev is not None else 'n/a'} last={last:.2f} "
+                    f"dd_last={dd_last*100:.2f}% dd_min={dd_min:.2f}% dd_max={dd_max:.2f}%")
+              # =====================================
+
               # 尋找「近 LOOKBACK_BARS 內首次跨越」的級別
               alert_levels = []
               for th in THRESHOLDS:
@@ -148,15 +162,16 @@ jobs:
               # 隔夜補償：若昨日收盤在門檻上、現價在門檻下，第一次執行也推一次
               _, daily = daily_series(s_norm)
               if daily is not None and "Close" in daily.columns and len(daily["Close"].dropna()) >= 2:
-                  prev_day_close = float(daily["Close"].dropna().iloc[-2])
+                  prev_day_close = daily["Close"].dropna().iloc[-2].to_numpy().item()
                   dd_prev_day = (roll_high - prev_day_close) / roll_high
-                  curr = float(close.iloc[-1])
+                  curr = close.iloc[-1].to_numpy().item()
                   dd_curr = (roll_high - curr) / roll_high
                   for th in THRESHOLDS:
                       if dd_prev_day < th <= dd_curr and th not in alert_levels:
                           alert_levels.append(th)
 
-              last = float(close.iloc[-1])
+              # 以最新價決策輸出
+              last = close.iloc[-1].to_numpy().item()
               dd_last = (roll_high - last) / roll_high
 
               if alert_levels:
