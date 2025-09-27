@@ -32,7 +32,7 @@ jobs:
             "QQQ","VOO","NVDA","AAPL","LEU","ONDS","OKLO","GOOGL","AMD","TSM","TSLA",
             "2330.TW","3231.TW","1504.TW","2317.TW","3189.TW"
           ]
-          THRESHOLDS       = [0.03, 0.12, 0.18]  # 回落 3%、12%、18%
+          THRESHOLDS       = [0.09, 0.12, 0.18]  # 回落 3%、12%、18%
           WINDOW_DAYS      = 60                  # 近 3 個月 ≈ 60 交易日
           INTRADAY_INTERVAL= "5m"                # 盤中 5 分鐘 K
           INTRADAY_PERIOD  = "7d"                # 抓 7 天即可
