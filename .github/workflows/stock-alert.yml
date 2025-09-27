@@ -3,25 +3,19 @@ name: Multi Stock Alerts (15min)
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: "*/15 * * * *"   # 每 15 分鐘（UTC）跑一次
+    - cron: "*/15 * * * *"   # 每 15 分鐘（UTC）
 
 jobs:
   run:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Show Python version
+        run: python3 --version
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install deps
+      - name: Install deps (no actions used)
         run: |
-          python -m pip install --upgrade pip
-          pip install yfinance pandas requests pytz
+          python3 -m pip install --upgrade pip
+          pip3 install yfinance pandas requests pytz
 
       - name: Check and alert
         env:
@@ -36,20 +30,20 @@ jobs:
           from zoneinfo import ZoneInfo
 
           # ========= 你可調的參數 =========
-          SYMBOLS     = [
-              # 美股
-              "QQQ","VOO","NVDA","AAPL","TSLA","GOOGL","OKLO",
-              # 台股（一定要加 .TW 或 .TWO）
-              "2330.TW","2454.TW","1504.TW"
+          SYMBOLS = [
+            # 美股
+            "QQQ","VOO","NVDA","AAPL","TSLA","GOOGL","OKLO","LEU","AMD",
+            # 台股（記得加 .TW / .TWO）
+            "2330.TW","2454.TW","1504.TW","3231.TW"
           ]
-          THRESHOLDS  = [0.07, 0.12, 0.18]  # 從近 60 日高回落 7% / 12% / 18% 觸發
-          WINDOW_DAYS = 60                  # 近 3 個月 ≈ 60 交易日
-          INTRADAY_INTERVAL = "5m"          # 盤中取 5 分鐘 K
-          INTRADAY_PERIOD   = "7d"          # 拉 7 天就能拿到最新價
+          THRESHOLDS  = [0.07, 0.12, 0.18]  # 近 60 日高回落 7% / 12% / 18%
+          WINDOW_DAYS = 60                  # ≈ 3 個月
+          INTRADAY_INTERVAL = "5m"          # 盤中 5m K
+          INTRADAY_PERIOD   = "7d"          # 取 7 天資料以拿到最新價
           UTC = ZoneInfo("UTC")
 
-          # ========= LINE（Messaging API）=========
-          LINE_TOKEN = os.getenv("LINE_TOKEN")
+          # ========= LINE 推播 =========
+          LINE_TOKEN   = os.getenv("LINE_TOKEN")
           LINE_USER_ID = os.getenv("LINE_USER_ID")
 
           def send_line(text: str):
@@ -57,35 +51,25 @@ jobs:
                   print("[WARN] LINE secrets missing; skip push.")
                   return
               url = "https://api.line.me/v2/bot/message/push"
-              headers = {
-                  "Authorization": f"Bearer {LINE_TOKEN}",
-                  "Content-Type": "application/json",
-              }
-              body = {"to": LINE_USER_ID, "messages": [{"type": "text", "text": text[:4900]}]}
+              headers = {"Authorization": f"Bearer {LINE_TOKEN}",
+                         "Content-Type": "application/json"}
+              body = {"to": LINE_USER_ID, "messages": [{"type":"text","text":text[:4900]}]}
               r = requests.post(url, headers=headers, json=body, timeout=15)
               if r.status_code >= 300:
                   print(f"[WARN] LINE push fail {r.status_code}: {r.text}")
 
-          # ========= 資料抓取與計算 =========
+          # ========= 計算：近 N 日相對高點 =========
           def recent_N_high(sym: str, N: int) -> float:
-              """
-              最近 N 根日 K 的「相對高點」。
-              - 優先用 rolling N 的最後一值（資料夠長時）
-              - 不夠長就用 tail(N).max()
-              """
-              dfd = yf.download(sym, period=f"{N+40}d", interval="1d", progress=False, auto_adjust=False).dropna()
+              dfd = yf.download(sym, period=f"{N+40}d", interval="1d",
+                                progress=False, auto_adjust=False).dropna()
               if dfd.empty or "High" not in dfd:
                   raise RuntimeError(f"No daily High for {sym}")
               highs = dfd["High"].astype(float)
-              if len(highs) >= N:
-                  return float(highs.rolling(window=N).max().iloc[-1])
-              return float(highs.tail(N).max())
+              return float((highs.rolling(N).max().iloc[-1]
+                           if len(highs) >= N else highs.tail(N).max()))
 
+          # ========= 最新兩筆 5m（不足退回日線）=========
           def last_two_5m_close(sym: str):
-              """
-              回傳最近兩筆 5 分鐘 Close（prev, last）。
-              若 5m 不足，退回日線兩筆。
-              """
               try:
                   df5 = yf.download(sym, period=INTRADAY_PERIOD, interval=INTRADAY_INTERVAL,
                                     progress=False, auto_adjust=False).dropna()
@@ -94,8 +78,8 @@ jobs:
                       return float(prev), float(last)
               except Exception as e:
                   print(f"[INFO] 5m fetch fail {sym}: {e.__class__.__name__}")
-
-              dfd = yf.download(sym, period="10d", interval="1d", progress=False, auto_adjust=False).dropna()
+              dfd = yf.download(sym, period="10d", interval="1d",
+                                progress=False, auto_adjust=False).dropna()
               if len(dfd) >= 2:
                   prev, last = dfd["Close"].iloc[-2], dfd["Close"].iloc[-1]
                   return float(prev), float(last)
@@ -104,26 +88,21 @@ jobs:
               else:
                   raise RuntimeError(f"No price for {sym}")
 
+          # ========= 單檔檢查：跨門檻才推一次 =========
           def check_one(sym: str) -> str:
-              base = recent_N_high(sym, WINDOW_DAYS)       # 近 60 日高
-              prev, last = last_two_5m_close(sym)          # 最近兩筆 5m close
-              dd_prev = (base - prev) / base               # 前一筆回落比例
-              dd_last = (base - last) / base               # 最新回落比例
-
+              base = recent_N_high(sym, WINDOW_DAYS)
+              prev, last = last_two_5m_close(sym)
+              dd_prev, dd_last = (base - prev)/base, (base - last)/base
               crossed = [th for th in THRESHOLDS if dd_prev < th <= dd_last]
-              print(f"{sym}: base={base:.4f}, prev={prev:.4f}, last={last:.4f}, "
-                    f"dd_prev={dd_prev:.4%}, dd_last={dd_last:.4%}, crossed={crossed}")
-
+              print(f"{sym}: base={base:.4f} prev={prev:.4f} last={last:.4f} "
+                    f"dd_prev={dd_prev:.4%} dd_last={dd_last:.4%} crossed={crossed}")
               if not crossed:
                   return f"OK {sym} {dd_last*100:.2f}%"
-
               levels_txt = ", ".join(f"{int(th*100)}%" for th in crossed)
-              msg = (
-                  f"📉 {sym} 由近{WINDOW_DAYS}日高回落觸發：{levels_txt}\n"
-                  f"現價 {last:.2f}｜近高 {base:.2f}｜回落 {dd_last*100:.2f}%\n"
-                  f"基準：{WINDOW_DAYS}日高 vs 5m 價\n"
-                  f"UTC：{dt.datetime.now(tz=UTC):%Y-%m-%d %H:%M}"
-              )
+              msg = (f"📉 {sym} 由近{WINDOW_DAYS}日高回落觸發：{levels_txt}\n"
+                     f"現價 {last:.2f}｜近高 {base:.2f}｜回落 {dd_last*100:.2f}%\n"
+                     f"基準：{WINDOW_DAYS}日高 vs 5m 價\n"
+                     f"UTC：{dt.datetime.now(tz=UTC):%Y-%m-%d %H:%M}")
               send_line(msg)
               return f"ALERT {sym} {levels_txt}"
 
@@ -134,6 +113,5 @@ jobs:
                   results.append(check_one(s))
               except Exception as e:
                   results.append(f"[ERR] {s} {e.__class__.__name__}: {e}")
-
           print("\n".join(results))
           PY
