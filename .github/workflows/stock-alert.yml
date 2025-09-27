@@ -1,58 +1,128 @@
-name: Multi Stock Alerts (15min)
+python3 - << 'PY'
+import os, datetime as dt, requests, yfinance as yf
+from zoneinfo import ZoneInfo
 
-on:
-  schedule:
-    - cron: "*/15 * * * *"   # 每 15 分鐘跑
-  workflow_dispatch:          # 可手動測試
+TOKEN = os.getenv("LINE_TOKEN")
+USER  = os.getenv("LINE_USER_ID")
 
-jobs:
-  run:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Install Python deps
-        run: |
-          python3 -m pip install --upgrade pip
-          pip3 install yfinance pandas numpy requests
+# ========= 你可調的參數 =========
+SYMBOLS     = ["QQQ","VOO","NVDA","AAPL","LEU","ONDS","OKLO","GOOGL","AMD","TSM","TSLA,","2330.TW","3231.TW","1504.TW","2317.TW","3189.TW"]  # 美股直接代號；台股一定要 .TW/.TWO
+THRESHOLDS  = [0.07, 0.12, 0.18]  # 從近 60 日高回落 7% / 12% / 18% 觸發
+WINDOW_DAYS = 60                  # 近 3 個月 ≈ 60 交易日
+INTRADAY_INTERVAL = "5m"          # 盤中取 5 分鐘 K
+INTRADAY_PERIOD   = "7d"          # 拉 7 天就能拿到最新價
+# ===============================
 
-      - name: Check and alert
-        env:
-          LINE_TOKEN: ${{ secrets.LINE_TOKEN }}
-          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
-        run: |
-          python3 - << 'PY'
-          import os, datetime as dt, requests, yfinance as yf, pandas as pd
+NY  = ZoneInfo("America/New_York")
+TPE = ZoneInfo("Asia/Taipei")
+UTC = ZoneInfo("UTC")
 
-          TOKEN = os.getenv("LINE_TOKEN")
-          USER  = os.getenv("LINE_USER_ID")
+def normalize(sym: str) -> str:
+    s = sym.strip().upper()
+    if s.isdigit():       # 純數字視為台股上市
+        s += ".TW"
+    return s
 
-          # <<< 你可以改這兩行 >>>
-          SYMBOLS    = ["QQQ","VOO","LEO","TSLA","NVDA","TSM","OKLO","GOOGL","AAPL","0050.TW","3189.TW","2317.TW","2330.TW","1504.TW"]   # 台股要 .TW
-          THRESHOLDS = [0.01, 0.10]               # 1%、10% 回落
-          # <<< 到此 >>>
+def is_tw_symbol(sym: str) -> bool:
+    s = normalize(sym)
+    return s.endswith(".TW") or s.endswith(".TWO")
 
-          def send_line(text):
-              headers={"Authorization":f"Bearer {TOKEN}","Content-Type":"application/json"}
-              body={"to": USER, "messages":[{"type":"text","text": text}]}
-              r=requests.post("https://api.line.me/v2/bot/message/push",
-                              headers=headers, json=body, timeout=30)
-              r.raise_for_status()
+def is_us_symbol(sym: str) -> bool:
+    return not is_tw_symbol(sym)
 
-          def check_once(sym):
-              df = yf.download(sym, period="max", interval="1d", auto_adjust=True, progress=False)
-              if df.empty or len(df)<3:
-                  return f"[WARN] no data for {sym}"
-              c=df["Close"]; ath=float(c.max()); prev=float(c.iloc[-2]); last=float(c.iloc[-1])
-              dd_prev=(ath-prev)/ath; dd_last=(ath-last)/ath
-              crossed=[th for th in THRESHOLDS if dd_prev < th <= dd_last]
-              if crossed:
-                  levels=", ".join(f"{int(th*100)}%" for th in crossed)
-                  msg=(f"📉 {sym} 回落觸發：{levels}\n"
-                       f"現價 {last:.2f}｜ATH {ath:.2f}｜目前回落 {dd_last*100:.2f}%\n"
-                       f"{dt.datetime.utcnow():%Y-%m-%d %H:%M} UTC")
-                  send_line(msg)
-                  return f"ALERT {sym} {levels}"
-              return f"OK {sym} {dd_last*100:.2f}%"
+def is_us_session_now(now=None) -> bool:
+    """美股盤中（不細查假日；Mon–Fri 09:30–16:00 ET）"""
+    now = now or dt.datetime.now(tz=NY)
+    if now.weekday() >= 5:  # 0=Mon
+        return False
+    t = now.time()
+    return dt.time(9,30) <= t <= dt.time(16,0)
 
-          results = [check_once(s) for s in SYMBOLS]
-          print("RESULT:", results, dt.datetime.utcnow())
-          PY
+def is_tw_session_now(now=None) -> bool:
+    """台股盤中（不細查假日；Mon–Fri 09:00–13:30 台北）"""
+    now = now or dt.datetime.now(tz=TPE)
+    if now.weekday() >= 5:
+        return False
+    t = now.time()
+    return dt.time(9,0) <= t <= dt.time(13,30)
+
+def send_line(text: str):
+    headers = {"Authorization": f"Bearer {TOKEN}", "Content-Type":"application/json"}
+    body = {"to": USER, "messages":[{"type":"text","text": text}]}
+    r = requests.post("https://api.line.me/v2/bot/message/push",
+                      headers=headers, json=body, timeout=30)
+    r.raise_for_status()
+
+def daily_series(sym):
+    """拿日線（用來計算近 60 日高點）。"""
+    s = normalize(sym)
+    # 抓夠長，確保能計出 60d rolling high
+    df = yf.download(s, period="1y", interval="1d", auto_adjust=True, progress=False)
+    return s, df
+
+def intraday_last_two(sym):
+    """取盤中最後兩根（用來判斷是否跨門檻）。"""
+    s = normalize(sym)
+    df = yf.download(s, period=INTRADAY_PERIOD, interval=INTRADAY_INTERVAL,
+                     auto_adjust=True, progress=False)
+    if df is None or df.empty or "Close" not in df.columns or len(df["Close"].dropna()) < 2:
+        return s, None, None
+    c = df["Close"].dropna()
+    return s, float(c.iloc[-2]), float(c.iloc[-1])
+
+def calc_rolling_high_close(sym):
+    """計算近 WINDOW_DAYS 日（收盤）滾動最高價。"""
+    s, df = daily_series(sym)
+    if df is None or df.empty or "Close" not in df.columns:
+        return s, None
+    c = df["Close"].dropna()
+    if len(c) < max(WINDOW_DAYS, 5):
+        return s, None
+    roll_high = float(c.rolling(WINDOW_DAYS).max().dropna().iloc[-1])
+    return s, roll_high
+
+def alert_text(s, last, roll_high, dd_last, levels, basis_txt):
+    levels_txt = ", ".join(f"{int(th*100)}%" for th in levels)
+    now_utc = dt.datetime.now(tz=UTC).strftime("%Y-%m-%d %H:%M")
+    return (f"📉 {s} 由近{WINDOW_DAYS}日高回落觸發：{levels_txt}\n"
+            f"現價 {last:.2f}｜近高 {roll_high:.2f}｜回落 {dd_last*100:.2f}%\n"
+            f"基準：{basis_txt}\nUTC：{now_utc}")
+
+def check_intraday(sym, which: str):
+    """共用的盤中檢查：which='US' or 'TW'"""
+    if which == 'US' and not is_us_session_now():
+        return f"SKIP {sym} (美股非盤中)"
+    if which == 'TW' and not is_tw_session_now():
+        return f"SKIP {sym} (台股非盤中)"
+
+    s, roll_high = calc_rolling_high_close(sym)
+    if roll_high is None:
+        return f"[WARN] 無日線基準 {s}"
+
+    s, prev, last = intraday_last_two(sym)
+    if prev is None or last is None:
+        return f"[WARN] 盤中價不足 {s}"
+
+    dd_prev = (roll_high - prev) / roll_high
+    dd_last = (roll_high - last) / roll_high
+    crossed = [th for th in THRESHOLDS if dd_prev < th <= dd_last]
+
+    if crossed:
+        basis = f"{WINDOW_DAYS}日高 vs 5m 價"
+        msg = alert_text(s, last, roll_high, dd_last, crossed, basis_txt=basis)
+        try:
+            send_line(msg)
+        except Exception as e:
+            return f"[WARN] line fail {s}: {e.__class__.__name__}"
+        return f"ALERT {s} {', '.join(str(int(th*100))+'%' for th in crossed)}"
+    return f"OK {s} {dd_last*100:.2f}% (盤中)"
+
+def check_one(sym):
+    if is_tw_symbol(sym):
+        return check_intraday(sym, 'TW')
+    else:
+        return check_intraday(sym, 'US')
+
+results = [check_one(s) for s in SYMBOLS]
+print("RESULT:", results, dt.datetime.now(tz=UTC))
+PY
