@@ -14,7 +14,7 @@ jobs:
           python3 -m pip install --upgrade pip
           pip3 install yfinance pandas numpy requests
 
-      - name: Check and alert (US+TW intraday, 60-day high, 7/12/18%)
+      - name: Check and alert (US+TW intraday, 60-day high, 7/12/18%, lookback)
         env:
           LINE_TOKEN: ${{ secrets.LINE_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
@@ -22,25 +22,35 @@ jobs:
           python3 - << 'PY'
           import os, datetime as dt, requests, yfinance as yf
           from zoneinfo import ZoneInfo
+          import re
 
           TOKEN = os.getenv("LINE_TOKEN")
           USER  = os.getenv("LINE_USER_ID")
 
-          # ===== 你可以改這裡 =====
-          SYMBOLS     = ["QQQ","VOO","NVDA","AAPL","LEU","ONDS","OKLO","GOOGL","AMD","TSM","TSLA,","2330.TW","3231.TW","1504.TW","2317.TW","3189.TW"]  # 台股務必加 .TW/.TWO
-          THRESHOLDS  = [0.03, 0.12, 0.18]   # 回落 7%、12%、18%
-          WINDOW_DAYS = 60                   # 近三個月 ≈ 60 交易日
-          INTRADAY_INTERVAL = "5m"           # 盤中用 5 分鐘 K
-          INTRADAY_PERIOD   = "7d"           # 拉 7 天即可
-          # =========================
+          # ===== 追蹤清單與參數（可調） =====
+          SYMBOLS = [
+            "QQQ","VOO","NVDA","AAPL","LEU","ONDS","OKLO","GOOGL","AMD","TSM","TSLA",
+            "2330.TW","3231.TW","1504.TW","2317.TW","3189.TW"
+          ]
+          THRESHOLDS       = [0.03, 0.12, 0.18]  # 回落 7%、12%、18%
+          WINDOW_DAYS      = 60                  # 近 3 個月 ≈ 60 交易日
+          INTRADAY_INTERVAL= "5m"                # 盤中 5 分鐘 K
+          INTRADAY_PERIOD  = "7d"                # 抓 7 天即可
+          LOOKBACK_BARS    = 5                   # 回看最近 5 根（約 25 分避免漏報）
+          # =================================
 
           NY  = ZoneInfo("America/New_York")
           TPE = ZoneInfo("Asia/Taipei")
           UTC = ZoneInfo("UTC")
 
+          def sanitize(sym: str) -> str:
+              s = sym.strip()
+              s = re.sub(r'[,\s]+$', '', s)      # 去尾逗號/空白
+              return s
+
           def normalize(sym: str) -> str:
-              s = sym.strip().upper()
-              if s.isdigit():  # 純數字視為台股上市
+              s = sanitize(sym).upper()
+              if s.isdigit():       # 純數字 => 台股上市
                   s += ".TW"
               return s
 
@@ -48,15 +58,15 @@ jobs:
               s = normalize(sym)
               return s.endswith(".TW") or s.endswith(".TWO")
 
-          def is_us_session_now(now=None) -> bool:
-              now = now or dt.datetime.now(tz=NY)
+          def is_us_session_now() -> bool:
+              now = dt.datetime.now(tz=NY)
               if now.weekday() >= 5:  # 0=Mon
                   return False
               t = now.time()
               return dt.time(9,30) <= t <= dt.time(16,0)
 
-          def is_tw_session_now(now=None) -> bool:
-              now = now or dt.datetime.now(tz=TPE)
+          def is_tw_session_now() -> bool:
+              now = dt.datetime.now(tz=TPE)
               if now.weekday() >= 5:
                   return False
               t = now.time()
@@ -74,14 +84,11 @@ jobs:
               df = yf.download(s, period="1y", interval="1d", auto_adjust=True, progress=False)
               return s, df
 
-          def intraday_last_two(sym):
+          def intraday_series(sym):
               s = normalize(sym)
               df = yf.download(s, period=INTRADAY_PERIOD, interval=INTRADAY_INTERVAL,
                                auto_adjust=True, progress=False)
-              if df is None or df.empty or "Close" not in df.columns or len(df["Close"].dropna()) < 2:
-                  return s, None, None
-              c = df["Close"].dropna()
-              return s, float(c.iloc[-2]), float(c.iloc[-1])
+              return s, df
 
           def calc_rolling_high_close(sym):
               s, df = daily_series(sym)
@@ -94,44 +101,75 @@ jobs:
               return s, roll_high
 
           def alert_text(s, last, roll_high, dd_last, levels, basis_txt):
-              levels_txt = ", ".join(f"{int(th*100)}%" for th in levels)
+              levels_txt = ", ".join(f"{int(th*100)}%" for th in sorted(levels))
               now_utc = dt.datetime.now(tz=UTC).strftime("%Y-%m-%d %H:%M")
               return (f"📉 {s} 由近{WINDOW_DAYS}日高回落觸發：{levels_txt}\n"
                       f"現價 {last:.2f}｜近高 {roll_high:.2f}｜回落 {dd_last*100:.2f}%\n"
                       f"基準：{basis_txt}\nUTC：{now_utc}")
 
-          def check_intraday(sym):
-          # ==== TEMP 測試：忽略盤中限制 ====
-          #    if is_tw_symbol(sym):
-          #       if not is_tw_session_now():
-          #           return f"SKIP {sym} (台股非盤中)"
-          #    else:
-          #       if not is_us_session_now():
-          #          return f"SKIP {sym} (美股非盤中)"
-          # ==== TEMP END ====
+          def check_one(sym):
+              s_norm = normalize(sym)
+              # 盤中時段判斷
+              if is_tw_symbol(s_norm):
+                  if not is_tw_session_now():
+                      return f"SKIP {s_norm} (台股非盤中)"
+              else:
+                  if not is_us_session_now():
+                      return f"SKIP {s_norm} (美股非盤中)"
 
-              s, roll_high = calc_rolling_high_close(sym)
+              # 近60日高（用日線）
+              s, roll_high = calc_rolling_high_close(s_norm)
               if roll_high is None:
                   return f"[WARN] 無日線基準 {s}"
 
-              s, prev, last = intraday_last_two(sym)
-              if prev is None or last is None:
+              # 盤中 5m 序列（回看多根避免漏報）
+              s, df = intraday_series(s_norm)
+              if df is None or df.empty or "Close" not in df.columns:
+                  return f"[WARN] 盤中價不足 {s}"
+              close = df["Close"].dropna()
+              if len(close) < 3:
                   return f"[WARN] 盤中價不足 {s}"
 
-              dd_prev = (roll_high - prev) / roll_high
-              dd_last = (roll_high - last) / roll_high
-              crossed = [th for th in THRESHOLDS if dd_prev < th <= dd_last]
+              # 近 LOOKBACK_BARS 根（含當根）
+              tail = close.iloc[-(LOOKBACK_BARS+1):] if len(close) >= (LOOKBACK_BARS+1) else close
+              dd = (roll_high - tail) / roll_high
 
-              if crossed:
-                  basis = f"{WINDOW_DAYS}日高 vs 5m 價"
-                  msg = alert_text(s, last, roll_high, dd_last, crossed, basis_txt=basis)
+              # 尋找「近 LOOKBACK_BARS 內首次跨越」的級別
+              alert_levels = []
+              for th in THRESHOLDS:
+                  crossed = False
+                  for i in range(1, len(dd)):
+                      if dd.iloc[i-1] < th <= dd.iloc[i]:
+                          crossed = True
+                          break
+                  if crossed:
+                      alert_levels.append(th)
+
+              # 隔夜補償：若昨日收盤在門檻上、現價在門檻下，第一次執行也推一次
+              _, daily = daily_series(s_norm)
+              if daily is not None and "Close" in daily.columns and len(daily["Close"].dropna()) >= 2:
+                  prev_day_close = float(daily["Close"].dropna().iloc[-2])
+                  dd_prev_day = (roll_high - prev_day_close) / roll_high
+                  curr = float(close.iloc[-1])
+                  dd_curr = (roll_high - curr) / roll_high
+                  for th in THRESHOLDS:
+                      if dd_prev_day < th <= dd_curr and th not in alert_levels:
+                          alert_levels.append(th)
+
+              last = float(close.iloc[-1])
+              dd_last = (roll_high - last) / roll_high
+
+              if alert_levels:
+                  msg = alert_text(s, last, roll_high, dd_last, alert_levels, basis_txt="60日高 vs 5m 價")
                   try:
                       send_line(msg)
                   except Exception as e:
                       return f"[WARN] line fail {s}: {e.__class__.__name__}"
-                  return f"ALERT {s} {', '.join(str(int(th*100))+'%' for th in crossed)}"
-              return f"OK {s} {dd_last*100:.2f}% (盤中)"
+                  levels_txt = ", ".join(f"{int(th*100)}%" for th in sorted(alert_levels))
+                  return f"ALERT {s} {levels_txt}"
+              else:
+                  return f"OK {s} {dd_last*100:.2f}% (盤中)"
 
-          results = [check_intraday(s) for s in SYMBOLS]
+          results = [check_one(sym) for sym in SYMBOLS]
           print("RESULT:", results, dt.datetime.now(tz=UTC))
           PY
