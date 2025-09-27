@@ -1,0 +1,20 @@
+name: Multi Stock Alerts (15min)
+on:
+  schedule:
+    # 週一～週五，每 15 分跑一次（UTC 13–21 ≈ 台北 21:00–05:59）
+    - cron: "*/15 13-21 * * 1-5"
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_TOKEN: ${{ secrets.LINE_TOKEN }}              # 備用；如果你換另一個名稱也行
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+        run: python main.py
