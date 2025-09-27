@@ -110,12 +110,12 @@ jobs:
           def check_one(sym):
               s_norm = normalize(sym)
               # 盤中時段判斷
-              if is_tw_symbol(s_norm):
-                  if not is_tw_session_now():
-                      return f"SKIP {s_norm} (台股非盤中)"
-              else:
-                  if not is_us_session_now():
-                      return f"SKIP {s_norm} (美股非盤中)"
+              #if is_tw_symbol(s_norm):
+              #   if not is_tw_session_now():
+              #       return f"SKIP {s_norm} (台股非盤中)"
+              # else:
+              #   if not is_us_session_now():
+              #       return f"SKIP {s_norm} (美股非盤中)"
 
               # 近60日高（用日線）
               s, roll_high = calc_rolling_high_close(s_norm)
