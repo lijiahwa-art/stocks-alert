@@ -1,9 +1,11 @@
 name: Multi Stock Alerts (15min)
+
 on:
   schedule:
-    # 週一～週五，每 15 分跑一次（UTC 13–21 ≈ 台北 21:00–05:59）
+    # 週一到週五，UTC 13–21 每 15 分跑（約台北 21:00–05:59）
     - cron: "*/15 13-21 * * 1-5"
   workflow_dispatch:
+
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -12,12 +14,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install -r requirements.txt
-      - env:
-          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
-          LINE_TOKEN: ${{ secrets.LINE_TOKEN }}              # 備用；如果你換另一個名稱也行
-          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
-              - name: Run one-shot alert
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install yfinance pandas numpy requests
+
+      # 直接在 workflow 內跑內嵌 Python（不讀你 repo 的 main.py，避免 import schedule）
+      - name: Run one-shot alert
         env:
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
           LINE_TOKEN: ${{ secrets.LINE_TOKEN }}
@@ -29,14 +33,14 @@ jobs:
           TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN") or os.getenv("LINE_TOKEN")
           USER  = os.getenv("LINE_USER_ID")
 
-          SYMBOLS    = ["QQQ"]          # 想追蹤的標的（台股記得加 .TW）
+          SYMBOLS    = ["QQQ"]          # 想追蹤的標的（台股記得加 .TW，如 00662.TW）
           THRESHOLDS = [0.05, 0.10]     # 5%、10%
 
           def send_line(text):
               headers={"Authorization":f"Bearer {TOKEN}","Content-Type":"application/json"}
               body={"to": USER, "messages":[{"type":"text","text": text}]}
               r=requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=body, timeout=20)
-              print("LINE:", r.status_code, r.text[:100])
+              print("LINE:", r.status_code, r.text[:120])
 
           def check_once(sym):
               df = yf.download(sym, period="max", interval="1d", auto_adjust=True, progress=False)
@@ -56,4 +60,3 @@ jobs:
           for s in SYMBOLS:
               check_once(s)
           PY
-
