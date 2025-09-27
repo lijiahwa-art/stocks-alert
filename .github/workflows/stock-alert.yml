@@ -28,7 +28,7 @@ jobs:
 
           # ===== 你可以改這裡 =====
           SYMBOLS     = ["QQQ","VOO","NVDA","AAPL","LEU","ONDS","OKLO","GOOGL","AMD","TSM","TSLA,","2330.TW","3231.TW","1504.TW","2317.TW","3189.TW"]  # 台股務必加 .TW/.TWO
-          THRESHOLDS  = [0.07, 0.12, 0.18]   # 回落 7%、12%、18%
+          THRESHOLDS  = [0.03, 0.12, 0.18]   # 回落 7%、12%、18%
           WINDOW_DAYS = 60                   # 近三個月 ≈ 60 交易日
           INTRADAY_INTERVAL = "5m"           # 盤中用 5 分鐘 K
           INTRADAY_PERIOD   = "7d"           # 拉 7 天即可
