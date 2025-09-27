@@ -1,9 +1,10 @@
+# --- minimal one-shot runner: 不會 import 你的 multi_stock_alert.py ---
 import os, datetime as dt, requests, yfinance as yf, pandas as pd
 
 TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN") or os.getenv("LINE_TOKEN")
 USER  = os.getenv("LINE_USER_ID")
 
-# 監控清單與門檻（可改）
+# 監控清單與門檻（想改就改）
 SYMBOLS    = ["QQQ"]          # 例：["QQQ","VOO","NVDA","00662.TW"]
 THRESHOLDS = [0.05, 0.10]     # 5%、10%
 
@@ -16,8 +17,7 @@ def send_line(text: str):
 def check_once(sym: str):
     df = yf.download(sym, period="max", interval="1d", auto_adjust=True, progress=False)
     if df.empty or len(df) < 3:
-        print(f"[WARN] no data for {sym}")
-        return
+        print(f"[WARN] no data for {sym}"); return
     c = df["Close"]; ath = c.max()
     prev, last = c.iloc[-2], c.iloc[-1]
     dd_prev = (ath - prev)/ath
