@@ -27,7 +27,7 @@ jobs:
 
           # <<< 你可以改這兩行 >>>
           SYMBOLS    = ["QQQ","VOO","LEO","TSLA","NVDA","TSM","OKLO","GOOGL","AAPL","0050.TW","3189.TW","2317.TW","2330.TW","1504.TW"]   # 台股要 .TW
-          THRESHOLDS = [0.05, 0.10]               # 1%、10% 回落
+          THRESHOLDS = [0.01, 0.10]               # 1%、10% 回落
           # <<< 到此 >>>
 
           def send_line(text):
