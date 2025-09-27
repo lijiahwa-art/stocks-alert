@@ -1,1 +1,24 @@
+name: LINE Ping (manual)
 
+on:
+  workflow_dispatch:  # 手動觸發
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send LINE test message (no actions)
+        env:
+          LINE_TOKEN: ${{ secrets.LINE_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+        run: |
+          python3 - << 'PY'
+          import os, requests
+          token = os.environ["LINE_TOKEN"]
+          user  = os.environ["LINE_USER_ID"]
+          headers = {"Authorization": f"Bearer {token}", "Content-Type":"application/json"}
+          body = {"to": user, "messages":[{"type":"text","text":"✅ GitHub Actions 測試成功"}]}
+          r = requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=body, timeout=30)
+          r.raise_for_status()
+          print("OK")
+          PY
