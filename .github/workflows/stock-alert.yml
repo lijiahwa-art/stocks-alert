@@ -32,9 +32,9 @@ jobs:
           # ========= 你可調的參數 =========
           SYMBOLS = [
             # 美股
-            "QQQ","VOO","NVDA","AAPL","TSLA","GOOGL","OKLO","LEU","AMD",
+            "QQQ","VOO","NVDA","AAPL","TSLA","GOOGL","OKLO","LEU","AMD","ONDS",
             # 台股（記得加 .TW / .TWO）
-            "2330.TW","2454.TW","1504.TW","3231.TW"
+            "2330.TW","2454.TW","1504.TW","3231.TW","2317.TW"
           ]
           THRESHOLDS  = [0.07, 0.12, 0.18]  # 近 60 日高回落 7% / 12% / 18%
           WINDOW_DAYS = 60                  # ≈ 3 個月
