@@ -1,10 +1,11 @@
 name: Multi Stock Alerts (15min)
-
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: "*/15 * * * *"   # 每 15 分鐘（UTC）
-
+    # 台股 (Asia/Taipei 09:30–13:30 ≈ UTC 01:30–05:30，cron 難表達半點，取 01–05 近似)
+    - cron: "*/5 1-5 * * 1-5"
+    # 美股 (紐約 09:30–16:00；夏令時間約 UTC 13:30–20:00，取 13–20 近似)
+    - cron: "*/5 13-20 * * 1-5"
 jobs:
   run:
     runs-on: ubuntu-latest
