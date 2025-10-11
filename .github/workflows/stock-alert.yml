@@ -41,7 +41,7 @@ jobs:
           INTRA_INTERVAL        = "5m"                      # 盤中 5 分 K
           INTRA_PERIOD          = "7d"                      # 抓最近 7 天
           INTRA_BACKBARS        = 100                       # 以「最新兩根」判斷，但抓 100 根留回測
-          DEMO_IGNORE_SESSIONS  = False                     # 測試改 True；常駐請設 False
+          DEMO_IGNORE_SESSIONS  = True                      # 測試改 True；常駐請設 False
 
           # ===== UTC 為主，避免 DST 造成誤判 =====
           UTC = dt.timezone.utc
