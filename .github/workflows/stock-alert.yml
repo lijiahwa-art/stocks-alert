@@ -4,10 +4,10 @@ on:
   workflow_dispatch: {}
   schedule:
     # 台股：台北 09:00–13:30  ≈  UTC 01:00–05:30（留一點邊界，抓 01–06）
-    - cron: "*/5 1-6 * * 1-5"
+    - cron: "*/15 1-6 * * 1-5"
     # 美股：夏令 09:30–16:00 ≈ UTC 13:30–20:00；冬令 ≈ UTC 14:30–21:00
     # 取 13–21，涵蓋 DST 與邊界
-    - cron: "*/5 13-21 * * 1-5"
+    - cron: "*/15 13-21 * * 1-5"
 
 jobs:
   run:
@@ -41,7 +41,7 @@ jobs:
           INTRA_INTERVAL        = "5m"                      # 盤中 5 分 K
           INTRA_PERIOD          = "7d"                      # 抓最近 7 天
           INTRA_BACKBARS        = 100                       # 以「最新兩根」判斷，但抓 100 根留回測
-          DEMO_IGNORE_SESSIONS  = True                      # 測試改 True；常駐請設 False
+          DEMO_IGNORE_SESSIONS  = False                     # 測試改 True；常駐請設 False
 
           # ===== UTC 為主，避免 DST 造成誤判 =====
           UTC = dt.timezone.utc
