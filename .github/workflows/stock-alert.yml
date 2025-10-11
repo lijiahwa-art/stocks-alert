@@ -1,4 +1,4 @@
-name: Multi Stock Alerts (5m)
+name: Multi Stock Alerts (15m)
 
 on:
   workflow_dispatch: {}
