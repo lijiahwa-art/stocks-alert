@@ -1,11 +1,14 @@
-name: Multi Stock Alerts (15min)
+name: Multi Stock Alerts (5m)
+
 on:
   workflow_dispatch: {}
   schedule:
-    # 台股 (Asia/Taipei 09:30–13:30 ≈ UTC 01:30–05:30，cron 難表達半點，取 01–05 近似)
-    - cron: "*/5 1-5 * * 1-5"
-    # 美股 (紐約 09:30–16:00；夏令時間約 UTC 13:30–20:00，取 13–20 近似)
-    - cron: "*/5 13-20 * * 1-5"
+    # 台股：台北 09:00–13:30  ≈  UTC 01:00–05:30（留一點邊界，抓 01–06）
+    - cron: "*/5 1-6 * * 1-5"
+    # 美股：夏令 09:30–16:00 ≈ UTC 13:30–20:00；冬令 ≈ UTC 14:30–21:00
+    # 取 13–21，涵蓋 DST 與邊界
+    - cron: "*/5 13-21 * * 1-5"
+
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -13,9 +16,9 @@ jobs:
       - name: Install deps
         run: |
           python3 -m pip install --upgrade pip
-          pip3 install yfinance pandas numpy requests pytz
+          pip3 install yfinance pandas numpy requests
 
-      - name: Check & alert (robust scalars + verbose log)
+      - name: Check & alert (UTC session windows + debug)
         env:
           LINE_TOKEN: ${{ secrets.LINE_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
@@ -23,7 +26,6 @@ jobs:
         run: |
           python3 - << 'PY'
           import os, json, requests, datetime as dt, numpy as np, pandas as pd
-          from zoneinfo import ZoneInfo
           import yfinance as yf
           from pathlib import Path
 
@@ -34,18 +36,46 @@ jobs:
             # 台股（.TW / .TWO）
             "2330.TW","0050.TW","1504.TW","3231.TW","3189.TW","2317.TW","2449.TW",
           ]
-          THRESHOLDS            = [0.07, 0.12, 0.18,0.25]   # 7%、12%、18%、25%
-          WINDOW_DAYS           = 60                   # 近 60 日高
-          INTRA_INTERVAL        = "5m"
-          INTRA_PERIOD          = "7d"
-          INTRA_BACKBARS        = 100                  # 用最後兩根判斷
-          DEMO_IGNORE_SESSIONS  = False                # 測試時先 True，常駐改 False
+          THRESHOLDS            = [0.07, 0.12, 0.18, 0.25]  # 7%、12%、18%、25%
+          WINDOW_DAYS           = 60                        # 近 60 日高（相對高點）
+          INTRA_INTERVAL        = "5m"                      # 盤中 5 分 K
+          INTRA_PERIOD          = "7d"                      # 抓最近 7 天
+          INTRA_BACKBARS        = 100                       # 以「最新兩根」判斷，但抓 100 根留回測
+          DEMO_IGNORE_SESSIONS  = False                     # 測試改 True；常駐請設 False
 
-          NY  = ZoneInfo("America/New_York")
-          TPE = ZoneInfo("Asia/Taipei")
-          UTC = ZoneInfo("UTC")
+          # ===== UTC 為主，避免 DST 造成誤判 =====
+          UTC = dt.timezone.utc
 
-          # ===== LINE =====
+          def is_tw(sym:str)->bool:
+              s = sym.upper()
+              return s.endswith(".TW") or s.endswith(".TWO")
+
+          # 盤中改用 UTC 時間窗，並加一點緩衝（避免 09:30/16:00 邊界被卡）
+          def us_session_now()->bool:
+              t = dt.datetime.now(UTC).time()
+              # 夏令：13:30–20:00；冬令：14:30–21:00
+              # 為保險直接用 13:25–21:05，涵蓋 DST 與邊界
+              return (dt.time(13,25) <= t <= dt.time(21,5))
+
+          def tw_session_now()->bool:
+              t = dt.datetime.now(UTC).time()
+              # 台北 09:00–13:30 ≈ UTC 01:00–05:30，抓 01:00–05:40 边界更保守
+              return (dt.time(1,0) <= t <= dt.time(5,40))
+
+          # ===== 去重：把「最新已觸發層級」存到 runner 的暫存檔 =====
+          STATE_PATH = Path("/tmp/alert_state.json")
+          try:
+              STATE = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+          except Exception:
+              STATE = {}  # {symbol: last_level_int}
+
+          def save_state():
+              try:
+                  STATE_PATH.write_text(json.dumps(STATE), encoding="utf-8")
+              except Exception as e:
+                  print("[WARN] save state fail:", e)
+
+          # ===== LINE 推播 =====
           LINE_TOKEN   = os.getenv("LINE_TOKEN")
           LINE_USER_ID = os.getenv("LINE_USER_ID")
           def send_line(text:str):
@@ -58,26 +88,8 @@ jobs:
               if r.status_code >= 300:
                   print(f"[WARN] LINE push fail {r.status_code}: {r.text}")
 
-          # ===== 市場時間 =====
-          def is_tw(sym:str)->bool: return sym.upper().endswith(".TW") or sym.upper().endswith(".TWO")
-          def us_session_now()->bool:
-              now = dt.datetime.now(NY)
-              return now.weekday()<5 and dt.time(9,30)<=now.time()<=dt.time(16,0)
-          def tw_session_now()->bool:
-              now = dt.datetime.now(TPE)
-              return now.weekday()<5 and dt.time(9,0)<=now.time()<=dt.time(13,30)
-
-          # ===== 去重（暫存到 runner 的 /tmp）=====
-          STATE_PATH = Path("/tmp/alert_state.json")
-          try: STATE = json.loads(STATE_PATH.read_text(encoding="utf-8"))
-          except Exception: STATE = {}  # {symbol: last_level_int}
-          def save_state():
-              try: STATE_PATH.write_text(json.dumps(STATE), encoding="utf-8")
-              except Exception as e: print("[WARN] save state fail:", e)
-
-          # ===== 安全取 np array / Series =====
+          # ===== 安全轉 1-D array / Series =====
           def to_1d_array(x) -> np.ndarray:
-              """確保輸入轉成 1-D ndarray（非空）"""
               if x is None: return np.array([], dtype=float)
               if isinstance(x, pd.Series): arr = x.to_numpy()
               elif isinstance(x, pd.DataFrame):
@@ -85,12 +97,12 @@ jobs:
                   elif "High" in x: arr = x["High"].to_numpy()
                   else: arr = x.select_dtypes(include=[np.number]).to_numpy().squeeze()
               elif isinstance(x, (list, tuple, np.ndarray)): arr = np.asarray(x)
-              else: # 純量
+              else:  # 標量
                   arr = np.array([x], dtype=float)
               arr = pd.to_numeric(pd.Series(arr), errors="coerce").dropna().to_numpy()
               return arr
 
-          # ===== 取 60 日高（以日線 High）=====
+          # ===== 近 N 日（60 日）相對高點（用日 K 高點 High）=====
           def recent_N_high(sym:str, N:int) -> float:
               dfd = yf.download(sym, period=f"{N+40}d", interval="1d",
                                 auto_adjust=False, progress=False)
@@ -99,13 +111,12 @@ jobs:
               highs = to_1d_array(dfd["High"])
               if highs.size == 0: raise RuntimeError("empty highs")
               if highs.size >= N:
-                  # 用 numpy 做 rolling max（最後 N 根）
                   base = float(np.max(highs[-N:]))
               else:
                   base = float(np.max(highs))
               return base
 
-          # ===== 取 5m 價（不足就退回日線）=====
+          # ===== 取 5m 收盤（不足則退回日線）=====
           def get_5m_closes(sym:str) -> np.ndarray:
               try:
                   df5 = yf.download(sym, period=INTRA_PERIOD, interval=INTRA_INTERVAL,
@@ -115,7 +126,7 @@ jobs:
                       return s
               except Exception as e:
                   print(f"[INFO] 5m fetch fail {sym}: {e.__class__.__name__}")
-              # fallback: 日線
+              # fallback：用日線
               dfd = yf.download(sym, period="30d", interval="1d",
                                 auto_adjust=False, progress=False)
               s = to_1d_array(None if dfd is None or dfd.empty else dfd["Close"])
@@ -123,18 +134,26 @@ jobs:
                   raise RuntimeError("no enough price bars")
               return s
 
-          # ===== 層級計算 =====
+          # ===== 門檻層級（0：未達，1：達第一門檻…）=====
           def level_index(val: float, levels:list) -> int:
               idx = 0
               for i, th in enumerate(sorted(levels), start=1):
                   if val >= th: idx = i
               return idx
 
-          # ===== 主程式（每檔）=====
+          # ===== Debug：現在時間與盤中判斷 =====
+          now_utc = dt.datetime.now(UTC)
+          print(f"[DBG] now_utc={now_utc:%Y-%m-%d %H:%M}, "
+                f"us_session={us_session_now()}, tw_session={tw_session_now()}, "
+                f"IGNORE={DEMO_IGNORE_SESSIONS}")
+
+          # ===== 主程式（逐檔）=====
           def check_one(sym:str) -> str:
               if not DEMO_IGNORE_SESSIONS:
-                  if is_tw(sym) and not tw_session_now():   return f"SKIP {sym} (台股非盤中)"
-                  if (not is_tw(sym)) and not us_session_now(): return f"SKIP {sym} (美股非盤中)"
+                  if is_tw(sym) and not tw_session_now():
+                      return f"SKIP {sym}（台股非盤中）"
+                  if (not is_tw(sym)) and not us_session_now():
+                      return f"SKIP {sym}（美股非盤中）"
 
               base = float(recent_N_high(sym, WINDOW_DAYS))
               closes = get_5m_closes(sym)
@@ -146,14 +165,14 @@ jobs:
               dd_prev = (base - prevC) / base
               dd_last = (base - lastC) / base
 
-              # A. 跨門檻
+              # A. 「跨門檻」（上一根未達，這一根跨入）
               crossed = [th for th in THRESHOLDS if (dd_prev < th <= dd_last)]
-              # B. 首次落入或更低
+              # B. 「首次落入或更低」（不重複推）
               now_lvl  = level_index(dd_last, THRESHOLDS)
               last_lvl = int(STATE.get(sym, 0))
               first_time_at_or_below = (now_lvl > last_lvl) and (now_lvl > 0)
 
-              # ===== 詳細 log（你要看的%數/價位都在這）=====
+              # 詳細 log
               print(
                 f"[LOG] {sym} | base={base:.4f} | prevC={prevC:.4f} | lastC={lastC:.4f} | "
                 f"dd_prev={dd_prev*100:.2f}% | dd_last={dd_last*100:.2f}% | "
@@ -164,8 +183,8 @@ jobs:
               if not crossed and not first_time_at_or_below:
                   return f"OK {sym} {dd_last*100:.2f}%"
 
-              # 去重：記住最新層
-              if first_time_at_or_below and now_lvl>0:
+              # 記錄最新層級（做去重）
+              if first_time_at_or_below and now_lvl > 0:
                   STATE[sym] = now_lvl
                   save_state()
 
@@ -179,7 +198,7 @@ jobs:
                   f"📉 {sym} 近{WINDOW_DAYS}日高回落觸發：{levels_txt}\n"
                   f"回落 {dd_last*100:.2f}%｜基準高 {base:.2f}\n"
                   f"（5m 回測 {INTRA_BACKBARS} 根；以最新兩根判斷）\n"
-                  f"UTC：{dt.datetime.now(ZoneInfo('UTC')):%Y-%m-%d %H:%M}"
+                  f"UTC：{dt.datetime.now(UTC):%Y-%m-%d %H:%M}"
               )
               send_line(msg)
               return f"ALERT {sym} {levels_txt}"
