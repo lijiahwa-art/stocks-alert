@@ -1,24 +1,24 @@
-name: Multi Stock Alerts (15m)
+name: Multi Stock Alerts (Hourly, merged push, daily+monthly caps)
 
 on:
   workflow_dispatch: {}
   schedule:
-    # 台股：台北 09:00–13:30  ≈  UTC 01:00–05:30（留一點邊界，抓 01–06）
-    - cron: "*/15 1-6 * * 1-5"
-    # 美股：夏令 09:30–16:00 ≈ UTC 13:30–20:00；冬令 ≈ UTC 14:30–21:00
-    # 取 13–21，涵蓋 DST 與邊界
-    - cron: "*/15 13-21 * * 1-5"
+    # 台股：台北 09:00–13:30（整點近似）→ UTC 01–05
+    - cron: "0 1-5 * * 1-5"
+    # 美股：紐約 09:00–16:00（整點近似；含夏令時間）→ 約 UTC 13–20
+    - cron: "0 13-20 * * 1-5"
 
 jobs:
   run:
     runs-on: ubuntu-latest
+
     steps:
       - name: Install deps
         run: |
           python3 -m pip install --upgrade pip
-          pip3 install yfinance pandas numpy requests
+          pip3 install yfinance pandas numpy requests pytz
 
-      - name: Check & alert (UTC session windows + debug)
+      - name: Check & alert (hourly; merged; de-dup; daily+monthly caps)
         env:
           LINE_TOKEN: ${{ secrets.LINE_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
@@ -26,69 +26,110 @@ jobs:
         run: |
           python3 - << 'PY'
           import os, json, requests, datetime as dt, numpy as np, pandas as pd
+          from zoneinfo import ZoneInfo
           import yfinance as yf
           from pathlib import Path
 
-          # ===== 參數區 =====
+          # ===== 參數 =====
           SYMBOLS = [
             # 美股
             "QQQ","VOO","NVDA","AAPL","TSLA","GOOGL","OKLO","LEU","AMD","TSM",
             # 台股（.TW / .TWO）
             "2330.TW","0050.TW","1504.TW","3231.TW","3189.TW","2317.TW","2449.TW",
           ]
-          THRESHOLDS            = [0.07, 0.12, 0.18, 0.25]  # 7%、12%、18%、25%
-          WINDOW_DAYS           = 60                        # 近 60 日高（相對高點）
-          INTRA_INTERVAL        = "5m"                      # 盤中 5 分 K
-          INTRA_PERIOD          = "7d"                      # 抓最近 7 天
-          INTRA_BACKBARS        = 100                       # 以「最新兩根」判斷，但抓 100 根留回測
-          DEMO_IGNORE_SESSIONS  = False                     # 測試改 True；常駐請設 False
+          THRESHOLDS            = [0.07, 0.12, 0.18, 0.25]     # 7% / 12% / 18% / 25%
+          WINDOW_DAYS           = 60                            # 近 60 日高
+          INTRA_INTERVAL        = "5m"                          # 盤中 K
+          INTRA_PERIOD          = "7d"                          # 取最近 7 天資料
+          INTRA_BACKBARS        = 100                           # 以最後兩根判斷
+          DEMO_IGNORE_SESSIONS  = False                         # False=只盤中
 
-          # ===== UTC 為主，避免 DST 造成誤判 =====
-          UTC = dt.timezone.utc
+          # 每市場每日最多「推送次數」（合併訊息算 1 次）
+          MAX_PUSH_TW_PER_DAY   = 5
+          MAX_PUSH_US_PER_DAY   = 5
 
+          # 每月「訊息氣泡」上限（LINE 免費 200）
+          MONTHLY_CAP_BUBBLES   = 200
+
+          NY  = ZoneInfo("America/New_York")
+          TPE = ZoneInfo("Asia/Taipei")
+          UTC = ZoneInfo("UTC")
+
+          # ===== LINE（回傳實際送出的「訊息數」以計入月額度）=====
+          LINE_TOKEN   = os.getenv("LINE_TOKEN")
+          LINE_USER_ID = os.getenv("LINE_USER_ID")
+
+          def send_line(texts):
+              """
+              texts: List[str]（每個 str 為一個訊息氣泡）
+              會自動分批（每推最多 5 泡），回傳實際送出的「氣泡數」。
+              """
+              if not LINE_TOKEN or not LINE_USER_ID:
+                  print("[WARN] LINE secrets missing; skip push."); return 0
+              if isinstance(texts, str): texts = [texts]
+              headers = {"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"}
+              url = "https://api.line.me/v2/bot/message/push"
+              pack, max_per_push = [], 5
+              sent = 0
+              for t in texts:
+                  pack.append({"type":"text", "text": str(t)[:4900]})
+                  if len(pack) == max_per_push:
+                      r = requests.post(url, headers=headers, json={"to": LINE_USER_ID, "messages": pack}, timeout=20)
+                      print("[PUSH]", r.status_code, r.text[:200])
+                      sent += len(pack); pack = []
+              if pack:
+                  r = requests.post(url, headers=headers, json={"to": LINE_USER_ID, "messages": pack}, timeout=20)
+                  print("[PUSH]", r.status_code, r.text[:200])
+                  sent += len(pack)
+              return sent
+
+          # ===== 場別判斷 =====
           def is_tw(sym:str)->bool:
               s = sym.upper()
               return s.endswith(".TW") or s.endswith(".TWO")
 
-          # 盤中改用 UTC 時間窗，並加一點緩衝（避免 09:30/16:00 邊界被卡）
           def us_session_now()->bool:
-              t = dt.datetime.now(UTC).time()
-              # 夏令：13:30–20:00；冬令：14:30–21:00
-              # 為保險直接用 13:25–21:05，涵蓋 DST 與邊界
-              return (dt.time(13,25) <= t <= dt.time(21,5))
+              now = dt.datetime.now(NY)
+              return now.weekday()<5 and dt.time(9,0) <= now.time() <= dt.time(16,0)
 
           def tw_session_now()->bool:
-              t = dt.datetime.now(UTC).time()
-              # 台北 09:00–13:30 ≈ UTC 01:00–05:30，抓 01:00–05:40 边界更保守
-              return (dt.time(1,0) <= t <= dt.time(5,40))
+              now = dt.datetime.now(TPE)
+              return now.weekday()<5 and dt.time(9,0) <= now.time() <= dt.time(13,30)
 
-          # ===== 去重：把「最新已觸發層級」存到 runner 的暫存檔 =====
+          # ===== 去重狀態（門檻層級）=====
           STATE_PATH = Path("/tmp/alert_state.json")
-          try:
-              STATE = json.loads(STATE_PATH.read_text(encoding="utf-8"))
-          except Exception:
-              STATE = {}  # {symbol: last_level_int}
-
+          try: STATE = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+          except Exception: STATE = {}  # {symbol: last_level_int}
           def save_state():
-              try:
-                  STATE_PATH.write_text(json.dumps(STATE), encoding="utf-8")
-              except Exception as e:
-                  print("[WARN] save state fail:", e)
+              try: STATE_PATH.write_text(json.dumps(STATE), encoding="utf-8")
+              except Exception as e: print("[WARN] save state fail:", e)
 
-          # ===== LINE 推播 =====
-          LINE_TOKEN   = os.getenv("LINE_TOKEN")
-          LINE_USER_ID = os.getenv("LINE_USER_ID")
-          def send_line(text:str):
-              if not LINE_TOKEN or not LINE_USER_ID:
-                  print("[WARN] LINE secrets missing; skip push."); return
-              url = "https://api.line.me/v2/bot/message/push"
-              headers = {"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"}
-              body = {"to": LINE_USER_ID, "messages":[{"type":"text", "text": text[:4900]}]}
-              r = requests.post(url, headers=headers, json=body, timeout=20)
-              if r.status_code >= 300:
-                  print(f"[WARN] LINE push fail {r.status_code}: {r.text}")
+          # ===== 每市場每日推送計數（推送次數，非訊息數）=====
+          QUOTA_PATH = Path("/tmp/alert_quota.json")
+          try: QUOTA = json.loads(QUOTA_PATH.read_text(encoding="utf-8"))
+          except Exception: QUOTA = {"tw":{}, "us":{}}
+          def save_quota():
+              try: QUOTA_PATH.write_text(json.dumps(QUOTA), encoding="utf-8")
+              except Exception as e: print("[WARN] save quota fail:", e)
 
-          # ===== 安全轉 1-D array / Series =====
+          def today_tw(): return dt.datetime.now(TPE).strftime("%Y-%m-%d")
+          def today_us(): return dt.datetime.now(NY).strftime("%Y-%m-%d")
+
+          # ===== 每月訊息數（以「氣泡」為單位）=====
+          MONTH_PATH = Path("/tmp/alert_month.json")
+          cur_month = dt.datetime.now(UTC).strftime("%Y-%m")
+          try:
+              MONTH = json.loads(MONTH_PATH.read_text(encoding="utf-8"))
+              if MONTH.get("month") != cur_month:
+                  MONTH = {"month": cur_month, "used": 0}
+          except Exception:
+              MONTH = {"month": cur_month, "used": 0}
+
+          def save_month():
+              try: MONTH_PATH.write_text(json.dumps(MONTH), encoding="utf-8")
+              except Exception as e: print("[WARN] save month fail:", e)
+
+          # ===== 安全取 1D =====
           def to_1d_array(x) -> np.ndarray:
               if x is None: return np.array([], dtype=float)
               if isinstance(x, pd.Series): arr = x.to_numpy()
@@ -97,83 +138,63 @@ jobs:
                   elif "High" in x: arr = x["High"].to_numpy()
                   else: arr = x.select_dtypes(include=[np.number]).to_numpy().squeeze()
               elif isinstance(x, (list, tuple, np.ndarray)): arr = np.asarray(x)
-              else:  # 標量
-                  arr = np.array([x], dtype=float)
+              else: arr = np.array([x], dtype=float)
               arr = pd.to_numeric(pd.Series(arr), errors="coerce").dropna().to_numpy()
               return arr
 
-          # ===== 近 N 日（60 日）相對高點（用日 K 高點 High）=====
+          # ===== 近 N 日高 =====
           def recent_N_high(sym:str, N:int) -> float:
-              dfd = yf.download(sym, period=f"{N+40}d", interval="1d",
-                                auto_adjust=False, progress=False)
+              dfd = yf.download(sym, period=f"{N+40}d", interval="1d", auto_adjust=False, progress=False)
               if dfd is None or dfd.empty or "High" not in dfd.columns:
                   raise RuntimeError("no daily High")
               highs = to_1d_array(dfd["High"])
               if highs.size == 0: raise RuntimeError("empty highs")
-              if highs.size >= N:
-                  base = float(np.max(highs[-N:]))
-              else:
-                  base = float(np.max(highs))
-              return base
+              return float(np.max(highs[-N:])) if highs.size>=N else float(np.max(highs))
 
-          # ===== 取 5m 收盤（不足則退回日線）=====
+          # ===== 5m Close，不足退日線 =====
           def get_5m_closes(sym:str) -> np.ndarray:
               try:
-                  df5 = yf.download(sym, period=INTRA_PERIOD, interval=INTRA_INTERVAL,
-                                    auto_adjust=False, progress=False)
+                  df5 = yf.download(sym, period=INTRA_PERIOD, interval=INTRA_INTERVAL, auto_adjust=False, progress=False)
                   s = to_1d_array(None if df5 is None or df5.empty else df5["Close"])
-                  if s.size >= max(INTRA_BACKBARS+1, 2):
-                      return s
+                  if s.size >= max(INTRA_BACKBARS+1, 2): return s
               except Exception as e:
                   print(f"[INFO] 5m fetch fail {sym}: {e.__class__.__name__}")
-              # fallback：用日線
-              dfd = yf.download(sym, period="30d", interval="1d",
-                                auto_adjust=False, progress=False)
+              dfd = yf.download(sym, period="30d", interval="1d", auto_adjust=False, progress=False)
               s = to_1d_array(None if dfd is None or dfd.empty else dfd["Close"])
-              if s.size < max(INTRA_BACKBARS+1, 2):
-                  raise RuntimeError("no enough price bars")
+              if s.size < max(INTRA_BACKBARS+1, 2): raise RuntimeError("no enough price bars")
               return s
 
-          # ===== 門檻層級（0：未達，1：達第一門檻…）=====
           def level_index(val: float, levels:list) -> int:
               idx = 0
               for i, th in enumerate(sorted(levels), start=1):
                   if val >= th: idx = i
               return idx
 
-          # ===== Debug：現在時間與盤中判斷 =====
-          now_utc = dt.datetime.now(UTC)
-          print(f"[DBG] now_utc={now_utc:%Y-%m-%d %H:%M}, "
-                f"us_session={us_session_now()}, tw_session={tw_session_now()}, "
-                f"IGNORE={DEMO_IGNORE_SESSIONS}")
+          alerts_tw, alerts_us = [], []
+          verbose_logs = []
 
-          # ===== 主程式（逐檔）=====
-          def check_one(sym:str) -> str:
+          def check_one(sym:str):
+              # 盤中判斷
               if not DEMO_IGNORE_SESSIONS:
                   if is_tw(sym) and not tw_session_now():
-                      return f"SKIP {sym}（台股非盤中）"
+                      verbose_logs.append(f"SKIP {sym}（台股非盤中）"); return
                   if (not is_tw(sym)) and not us_session_now():
-                      return f"SKIP {sym}（美股非盤中）"
+                      verbose_logs.append(f"SKIP {sym}（美股非盤中）"); return
 
-              base = float(recent_N_high(sym, WINDOW_DAYS))
+              base   = float(recent_N_high(sym, WINDOW_DAYS))
               closes = get_5m_closes(sym)
               if closes.size < INTRA_BACKBARS+1:
-                  return f"[SKIP] {sym} not enough bars ({closes.size})"
+                  verbose_logs.append(f"[SKIP] {sym} not enough bars ({closes.size})"); return
 
-              prevC = float(closes[-2])
-              lastC = float(closes[-1])
-              dd_prev = (base - prevC) / base
-              dd_last = (base - lastC) / base
+              prevC   = float(closes[-2]);   lastC   = float(closes[-1])
+              dd_prev = (base - prevC) / base; dd_last = (base - lastC) / base
 
-              # A. 「跨門檻」（上一根未達，這一根跨入）
               crossed = [th for th in THRESHOLDS if (dd_prev < th <= dd_last)]
-              # B. 「首次落入或更低」（不重複推）
               now_lvl  = level_index(dd_last, THRESHOLDS)
               last_lvl = int(STATE.get(sym, 0))
               first_time_at_or_below = (now_lvl > last_lvl) and (now_lvl > 0)
 
-              # 詳細 log
-              print(
+              verbose_logs.append(
                 f"[LOG] {sym} | base={base:.4f} | prevC={prevC:.4f} | lastC={lastC:.4f} | "
                 f"dd_prev={dd_prev*100:.2f}% | dd_last={dd_last*100:.2f}% | "
                 f"crossed={[int(x*100) for x in crossed]} | level_prev={last_lvl} -> level_now={now_lvl} | "
@@ -181,9 +202,8 @@ jobs:
               )
 
               if not crossed and not first_time_at_or_below:
-                  return f"OK {sym} {dd_last*100:.2f}%"
+                  verbose_logs.append(f"OK {sym} {dd_last*100:.2f}%"); return
 
-              # 記錄最新層級（做去重）
               if first_time_at_or_below and now_lvl > 0:
                   STATE[sym] = now_lvl
                   save_state()
@@ -194,21 +214,71 @@ jobs:
                   levels_sorted = sorted(THRESHOLDS)
                   levels_txt = f"{int(levels_sorted[now_lvl-1]*100)}%"
 
-              msg = (
-                  f"📉 {sym} 近{WINDOW_DAYS}日高回落觸發：{levels_txt}\n"
-                  f"回落 {dd_last*100:.2f}%｜基準高 {base:.2f}\n"
-                  f"（5m 回測 {INTRA_BACKBARS} 根；以最新兩根判斷）\n"
-                  f"UTC：{dt.datetime.now(UTC):%Y-%m-%d %H:%M}"
+              line = (
+                f"📉 {sym} 近{WINDOW_DAYS}日高回落：{levels_txt}\n"
+                f"回落 {dd_last*100:.2f}%｜基準高 {base:.2f}"
               )
-              send_line(msg)
-              return f"ALERT {sym} {levels_txt}"
+              if is_tw(sym): alerts_tw.append(line)
+              else:          alerts_us.append(line)
+              verbose_logs.append(f"ALERT {sym} {levels_txt}")
 
-          results = []
+          # 跑一輪
           for s in SYMBOLS:
-              try:
-                  results.append(check_one(s))
-              except Exception as e:
-                  results.append(f"[ERR] {s} {e.__class__.__name__}: {e}")
+              try: check_one(s)
+              except Exception as e: verbose_logs.append(f"[ERR] {s} {e.__class__.__name__}: {e}")
 
-          print("\n".join(results))
+          print("\n".join(verbose_logs))
+
+          # ===== 每市場「每日推送次數」上限（先做日控）=====
+          msgs = []  # 收集欲送出的訊息泡泡（每個 str 一泡）
+
+          # 台股
+          if alerts_tw:
+              day = today_tw()
+              used = int(QUOTA["tw"].get(day, 0))
+              if used < MAX_PUSH_TW_PER_DAY:
+                  header = f"⚠️ TW 合併推播（{day}，今日已發 {used}/{MAX_PUSH_TW_PER_DAY}）"
+                  msgs.append(header + "\n\n" + "\n\n".join(alerts_tw))
+                  QUOTA["tw"][day] = used + 1
+                  save_quota()
+              else:
+                  print(f"[CAP] TW daily cap {MAX_PUSH_TW_PER_DAY} reached for {day}; skip TW push.")
+
+          # 美股
+          if alerts_us:
+              day = today_us()
+              used = int(QUOTA["us"].get(day, 0))
+              if used < MAX_PUSH_US_PER_DAY:
+                  header = f"⚠️ US 合併推播（{day}，今日已發 {used}/{MAX_PUSH_US_PER_DAY}）"
+                  msgs.append(header + "\n\n" + "\n\n".join(alerts_us))
+                  QUOTA["us"][day] = used + 1
+                  save_quota()
+              else:
+                  print(f"[CAP] US daily cap {MAX_PUSH_US_PER_DAY} reached for {day}; skip US push.")
+
+          # ===== 每月「訊息氣泡」上限（後做月控）=====
+          need = len(msgs)                # 本次要發的「泡泡數」
+          remain = MONTHLY_CAP_BUBBLES - int(MONTH.get("used", 0))
+
+          if need == 0:
+              print("[INFO] no alert or quota reached; no push.")
+          elif remain <= 0:
+              print(f"[CAP] Monthly cap {MONTHLY_CAP_BUBBLES} reached; no push.")
+          else:
+              # 如果要發的泡泡數超過剩餘，就把最後一格改成「額度用盡提醒」
+              if need > remain:
+                  # 只保留能發的數量
+                  allowed = max(1, remain)
+                  msgs = msgs[:allowed]
+                  # 最後一格改為提醒（佔用 1 泡）
+                  msgs[-1] = (
+                    f"⚠️ 已達每月 {MONTHLY_CAP_BUBBLES} 則免費額度上限。\n"
+                    f"當月後續提醒暫停，下月自動恢復。"
+                  )
+                  print(f"[CAP] Monthly cap reached; sending {allowed} bubble(s) including a warning, then stop.")
+
+              sent_bubbles = send_line(msgs)
+              MONTH["used"] = int(MONTH.get("used", 0)) + sent_bubbles
+              save_month()
+
           PY
